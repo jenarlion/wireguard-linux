@@ -108,17 +108,10 @@ struct clk {
 /***           runtime pm          ***/
 static int clk_pm_runtime_get(struct clk_core *core)
 {
-	int ret;
-
 	if (!core->rpm_enabled)
 		return 0;
 
-	ret = pm_runtime_get_sync(core->dev);
-	if (ret < 0) {
-		pm_runtime_put_noidle(core->dev);
-		return ret;
-	}
-	return 0;
+	return pm_runtime_resume_and_get(core->dev);
 }
 
 static void clk_pm_runtime_put(struct clk_core *core)
@@ -2332,14 +2325,18 @@ int clk_set_rate_exclusive(struct clk *clk, unsigned long rate)
 }
 EXPORT_SYMBOL_GPL(clk_set_rate_exclusive);
 
-static int clk_set_rate_range_nolock(struct clk *clk,
-				     unsigned long min,
-				     unsigned long max)
+/**
+ * clk_set_rate_range - set a rate range for a clock source
+ * @clk: clock source
+ * @min: desired minimum clock rate in Hz, inclusive
+ * @max: desired maximum clock rate in Hz, inclusive
+ *
+ * Returns success (0) or negative errno.
+ */
+int clk_set_rate_range(struct clk *clk, unsigned long min, unsigned long max)
 {
 	int ret = 0;
 	unsigned long old_min, old_max, rate;
-
-	lockdep_assert_held(&prepare_lock);
 
 	if (!clk)
 		return 0;
@@ -2352,6 +2349,8 @@ static int clk_set_rate_range_nolock(struct clk *clk,
 		       min, max);
 		return -EINVAL;
 	}
+
+	clk_prepare_lock();
 
 	if (clk->exclusive_count)
 		clk_core_rate_unprotect(clk->core);
@@ -2395,28 +2394,6 @@ static int clk_set_rate_range_nolock(struct clk *clk,
 out:
 	if (clk->exclusive_count)
 		clk_core_rate_protect(clk->core);
-
-	return ret;
-}
-
-/**
- * clk_set_rate_range - set a rate range for a clock source
- * @clk: clock source
- * @min: desired minimum clock rate in Hz, inclusive
- * @max: desired maximum clock rate in Hz, inclusive
- *
- * Return: 0 for success or negative errno on failure.
- */
-int clk_set_rate_range(struct clk *clk, unsigned long min, unsigned long max)
-{
-	int ret;
-
-	if (!clk)
-		return 0;
-
-	clk_prepare_lock();
-
-	ret = clk_set_rate_range_nolock(clk, min, max);
 
 	clk_prepare_unlock();
 
@@ -4419,7 +4396,9 @@ void __clk_put(struct clk *clk)
 	}
 
 	hlist_del(&clk->clks_node);
-	clk_set_rate_range_nolock(clk, 0, ULONG_MAX);
+	if (clk->min_rate > clk->core->req_rate ||
+	    clk->max_rate < clk->core->req_rate)
+		clk_core_set_rate_nolock(clk->core, clk->core->req_rate);
 
 	owner = clk->core->owner;
 	kref_put(&clk->core->ref, __clk_release);
